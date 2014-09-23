@@ -37,6 +37,8 @@ THE POSSIBILITY OF SUCH DAMAGE.
 #include <CommDlg.h>
 #include <stdio.h>
 #include <math.h>
+#include <WinInet.h>
+#include <string>
 
 // zoomed all the way in. We could allow this to be larger...
 // It's useful to have it high for Nether <--> overworld switches
@@ -1326,6 +1328,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         case IDM_FILE_PRINTOBJ:
 		case IDM_FILE_SAVEOBJ:
 		case IDM_FILE_SCHEMATIC:
+		case IDM_FILE_SKETCHFABUPLOAD:
 			if ( !gHighlightOn )
 			{
 				// we keep the export options ungrayed now so that they're selectable when the world is loaded
@@ -1343,6 +1346,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				break;
 			case IDM_FILE_SCHEMATIC:
 				gPrintModel = 2;
+				break;
+			case IDM_FILE_SKETCHFABUPLOAD:
+				gPrintModel = 3;
 				break;
 			default:
 				assert(0);
@@ -1370,6 +1376,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 					gExportSchematicData.fileType = FILE_TYPE_SCHEMATIC;	// always
 				}
+				else if (gPrintModel == 3)
+				{
+					// sketchfab upload
+
+					WCHAR tempDir[MAX_PATH + 1];
+					GetTempPath(MAX_PATH, tempDir);
+					
+					WCHAR processingDir[MAX_PATH + 1];
+					GetTempFileName(tempDir, L"skfb", 0, processingDir);
+					DeleteFile(processingDir); // GetTempFileName creates the file
+					CreateDirectory(processingDir, NULL); // we want a directory
+
+					PathCombine(gExportPath, processingDir, L"export.obj");
+
+					saveOK = true;
+					gExportSchematicData.fileType = FILE_TYPE_WAVEFRONT_ABS_OBJ;
+				}
 				else
 				{
 					// print model or render model - quite similar
@@ -1382,7 +1405,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					ofn.lpstrFilter= gPrintModel ? L"Sculpteo: Wavefront OBJ, absolute (*.obj)\0*.obj\0Wavefront OBJ, relative (*.obj)\0*.obj\0i.materialise: Binary Materialise Magics STL stereolithography file (*.stl)\0*.stl\0Binary VisCAM STL stereolithography file (*.stl)\0*.stl\0ASCII text STL stereolithography file (*.stl)\0*.stl\0Shapeways: VRML 2.0 (VRML 97) file (*.wrl)\0*.wrl\0" :
 												   L"Wavefront OBJ, absolute (*.obj)\0*.obj\0Wavefront OBJ, relative (*.obj)\0*.obj\0Binary Materialise Magics STL stereolithography file (*.stl)\0*.stl\0Binary VisCAM STL stereolithography file (*.stl)\0*.stl\0ASCII text STL stereolithography file (*.stl)\0*.stl\0VRML 2.0 (VRML 97) file (*.wrl)\0*.wrl\0";
 					ofn.nFilterIndex=(gPrintModel ? gExportPrintData.fileType+1 : gExportViewData.fileType+1);
-					ofn.lpstrFileTitle=NULL;
+					ofn.lpstrFileTitle = NULL;
 					ofn.nMaxFileTitle=0;
 					ofn.lpstrInitialDir=NULL;
 					ofn.lpstrTitle=gPrintModel ? L"Save Model for 3D Printing" :  L"Save Model for Rendering";
@@ -1404,7 +1427,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 if ( saveOK )
                 {
 					// if we got this far, then previous export is off, and we also want to ask for dialog.
-					gExported=0;
+					if ( gPrintModel != 3 )
+						gExported=0;
 
 		case IDM_FILE_REPEATPREVIOUSEXPORT:
                     gExported = saveObjFile(hWnd,gExportPath,gPrintModel,gSelectTerrain,!gExported);
@@ -2048,6 +2072,7 @@ static void validateItems(HMENU menu)
 		EnableMenuItem(menu,IDM_FILE_SAVEOBJ,MF_ENABLED);
 		EnableMenuItem(menu,IDM_FILE_PRINTOBJ,MF_ENABLED);
 		EnableMenuItem(menu,IDM_FILE_SCHEMATIC,MF_ENABLED);
+		EnableMenuItem(menu,IDM_FILE_SKETCHFABUPLOAD, MF_ENABLED);
     }
     else
     {
@@ -2058,6 +2083,7 @@ static void validateItems(HMENU menu)
 		EnableMenuItem(menu,IDM_FILE_PRINTOBJ,MF_DISABLED);
 		EnableMenuItem(menu,IDM_FILE_SCHEMATIC,MF_DISABLED);
         EnableMenuItem(menu,IDM_VIEW_JUMPTOMODEL,MF_DISABLED);
+		EnableMenuItem(menu, IDM_FILE_SKETCHFABUPLOAD, MF_DISABLED);
     }
 	// has a save been done?
 	if (gExported)
@@ -2189,7 +2215,7 @@ static int saveObjFile( HWND hWnd, wchar_t *objFileName, int printModel, wchar_t
     int on;
     int retCode = 0;
 
-	if ( printModel == 2 )
+	if ( printModel == 2 || printModel == 3 )
 	{
 		// schematic file - treat sort of like a render
 		gpEFD = &gExportSchematicData;
@@ -2440,9 +2466,9 @@ static int saveObjFile( HWND hWnd, wchar_t *objFileName, int printModel, wchar_t
 
         // zip it up - test that there's something to zip, in case of errors. Note that the first
         // file saved in ObjManip.c is the one used as the zip file's name.
+		wchar_t wcZip[MAX_PATH];
         if ( gpEFD->chkCreateZip[gpEFD->fileType] && (outputFileList.count > 0) )
         {
-            wchar_t wcZip[MAX_PATH];
             // we add .zip not (just) out of laziness, but this helps differentiate obj from wrl from stl.
             swprintf_s(wcZip,MAX_PATH,L"%s.zip",outputFileList.name[0]);
 
@@ -2488,6 +2514,82 @@ static int saveObjFile( HWND hWnd, wchar_t *objFileName, int printModel, wchar_t
                 gShowPrintStats = 0;
             }
         }
+
+		// upload to sketchfab
+		if (printModel == 3) {
+			static TCHAR headers[] = L"Content-Type: application/x-www-form-urlencoded";
+			static TCHAR formData = NULL; // token, modelFile, (name, description, tags, private=True, password)
+			static LPCWSTR accept[2] = { L"*/*", NULL };
+			HINTERNET hSession = InternetOpen(L"Mineways", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+			HINTERNET hConnect = InternetConnect(hSession, L"api.sketchfab.com", INTERNET_DEFAULT_HTTPS_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 1);
+			HINTERNET hRequest = HttpOpenRequest(hConnect, L"POST", L"/v2/models", NULL, NULL, accept, INTERNET_FLAG_NO_CACHE_WRITE, 1);
+
+			HttpAddRequestHeaders(hRequest, headers, (DWORD)-1, HTTP_ADDREQ_FLAG_REPLACE | HTTP_ADDREQ_FLAG_ADD);
+
+			std::string token = "40a0dd79a5fb4e0c962eab8760408585";
+
+			std::string boundary = "--------------------------9841a76e5fef1c1b";
+			std::string header = "Host: api.sketchfab.com\r\n"
+				"Accept: */*\r\n"
+				//"Content-Length: 275654561231563\r\n"
+				"Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+			std::string body = "--" + boundary + "\r\n" +
+				"Content-Disposition: form-data; name=\"modelFile\";\r\n\r\n" +
+				"filename=\"mineways.zip\"\r\n" +
+				"Content-Type: application/octet-stream\r\n" +
+				"\r\n";
+			std::string tail = "\r\n--" + boundary + "--" +
+				"Content-Disposition: form-data; name=\"token\"\r\n\r\n" +
+				token +
+				"\r\n--" + boundary + "--" +
+				"Content-Disposition: form-data; name=\"source\"\r\n\r\n" +
+				"mineways" +
+				"\r\n--" + boundary + "--\r\n";
+
+			DWORD bytesWritten;
+			INTERNET_BUFFERS bufferIn;
+			memset(&bufferIn, 0, sizeof(INTERNET_BUFFERS));
+			bufferIn.dwStructSize = sizeof(INTERNET_BUFFERS);
+			bufferIn.dwBufferTotal = header.length() + body.length() + GetFileSize(wcZip, NULL) + tail.length();
+			
+			HttpSendRequestEx(hRequest, &bufferIn, NULL, HSR_INITIATE, 0);
+			InternetWriteFile(hRequest, (const void*)header.c_str(), header.length(), &bytesWritten);
+			InternetWriteFile(hRequest, (const void*)body.c_str(), body.length(), &bytesWritten);
+			FILE* file;
+			_wfopen_s(&file, wcZip, L"rb");
+			size_t sizeRead;
+			char buf[4096];
+			while ((sizeRead = fread(buf, sizeof(buf), 1, file)) > 0) {
+				InternetWriteFile(hRequest, (const void*)buf, sizeRead, &bytesWritten);
+			}
+			fclose(file);
+			InternetWriteFile(hRequest, (const void*)tail.c_str(), tail.length(), &bytesWritten);
+			HttpEndRequest(hRequest, NULL, HSR_INITIATE, 0);
+
+			std::string response;
+			while (InternetReadFile(hRequest, buf, sizeof(buf) - 1, &bytesWritten)) {
+				if (bytesWritten == 0)
+					break;
+				buf[bytesWritten] = '\0';
+				response += buf;
+			}
+
+			DWORD headerBuffSize = sizeof(DWORD);
+			DWORD statusCode;
+			HttpQueryInfo(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &headerBuffSize, NULL);
+			if (statusCode == HTTP_STATUS_OK) {
+				MessageBox(hWnd, L"Upload completed", L"The model should be available on sketchfab", MB_OK | MB_ICONERROR);
+			} else {
+				std::wstring err = L"HTTP code : " + statusCode;
+				MessageBox(hWnd, L"Upload failed", err.c_str(), MB_OK | MB_ICONERROR);
+				std::wstring err2(response.begin(), response.end());
+				MessageBox(hWnd, L"Upload failed", err.c_str(), MB_OK | MB_ICONERROR);
+				response
+			}
+
+
+
+		}
 
         if ( errCode != MW_NO_ERROR )
         {
