@@ -31,6 +31,7 @@ THE POSSIBILITY OF SUCH DAMAGE.
 #include "ColorSchemes.h"
 #include "ExportPrint.h"
 #include "XZip.h"
+#include "GenericHTTPClient.h"
 #include <assert.h>
 #include <ShlObj.h>
 #include <Shlwapi.h>
@@ -39,6 +40,8 @@ THE POSSIBILITY OF SUCH DAMAGE.
 #include <math.h>
 #include <WinInet.h>
 #include <string>
+#include <sstream>
+#include <iostream>
 
 // zoomed all the way in. We could allow this to be larger...
 // It's useful to have it high for Nether <--> overworld switches
@@ -1355,6 +1358,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 				gPrintModel = 0;
 			}
 			{
+				WCHAR processingDir[MAX_PATH + 1];
+
 				if ( gPrintModel == 2 )
 				{
 					// schematic
@@ -1383,7 +1388,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 					WCHAR tempDir[MAX_PATH + 1];
 					GetTempPath(MAX_PATH, tempDir);
 					
-					WCHAR processingDir[MAX_PATH + 1];
 					GetTempFileName(tempDir, L"skfb", 0, processingDir);
 					DeleteFile(processingDir); // GetTempFileName creates the file
 					CreateDirectory(processingDir, NULL); // we want a directory
@@ -1432,6 +1436,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 		case IDM_FILE_REPEATPREVIOUSEXPORT:
                     gExported = saveObjFile(hWnd,gExportPath,gPrintModel,gSelectTerrain,!gExported);
+
+					// remove temporary folder
+					if (gPrintModel == 3)
+					{
+						SHFILEOPSTRUCT file_op = {
+							NULL,
+							FO_DELETE,
+							processingDir,
+							NULL,
+							FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT,
+							false,
+							0,
+							NULL
+						};
+						SHFileOperation(&file_op);
+					}
 
                     SetHighlightState(1, gpEFD->minxVal, gpEFD->minyVal, gpEFD->minzVal, gpEFD->maxxVal, gpEFD->maxyVal, gpEFD->maxzVal );
 					enableBottomControl( 1, hwndBottomSlider, hwndBottomLabel, hwndInfoBottomLabel );
@@ -2517,78 +2537,38 @@ static int saveObjFile( HWND hWnd, wchar_t *objFileName, int printModel, wchar_t
 
 		// upload to sketchfab
 		if (printModel == 3) {
-			static TCHAR headers[] = L"Content-Type: application/x-www-form-urlencoded";
-			static TCHAR formData = NULL; // token, modelFile, (name, description, tags, private=True, password)
-			static LPCWSTR accept[2] = { L"*/*", NULL };
-			HINTERNET hSession = InternetOpen(L"Mineways", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
-			HINTERNET hConnect = InternetConnect(hSession, L"api.sketchfab.com", INTERNET_DEFAULT_HTTPS_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 1);
-			HINTERNET hRequest = HttpOpenRequest(hConnect, L"POST", L"/v2/models", NULL, NULL, accept, INTERNET_FLAG_NO_CACHE_WRITE, 1);
+			GenericHTTPClient *pClient = new GenericHTTPClient();
 
-			HttpAddRequestHeaders(hRequest, headers, (DWORD)-1, HTTP_ADDREQ_FLAG_REPLACE | HTTP_ADDREQ_FLAG_ADD);
+			pClient->InitilizePostArguments();
+			// if using utf-8 characters in your Post Arguments
+			// be sure to save source code file as utf-8
+			// Visual Studio => File menu => "advanced save option" => encoding => "Unicode (UTF-8 without signature) - Codepage 65001"
+			pClient->AddPostArguments(L"token", L"40a0dd79a5fb4e0c962eab8760408585");// token from sketchfab user dashboard
+			pClient->AddPostArguments(L"fileModel", wcZip, TRUE); // file path
+			pClient->AddPostArguments(L"title", L"nice model title");
+			//pClient->AddPostArguments( "description", "fitting description" );
+			//pClient->AddPostArguments( "tags", "meaningfultag moremeaningfultag" );
+			//pClient->AddPostArguments( "private", "1" );// "0" or not 
+			//pClient->AddPostArguments( "password", "myprivatepass" );
 
-			std::string token = "40a0dd79a5fb4e0c962eab8760408585";
-
-			std::string boundary = "--------------------------9841a76e5fef1c1b";
-			std::string header = "Host: api.sketchfab.com\r\n"
-				"Accept: */*\r\n"
-				//"Content-Length: 275654561231563\r\n"
-				"Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
-			std::string body = "--" + boundary + "\r\n" +
-				"Content-Disposition: form-data; name=\"modelFile\";\r\n\r\n" +
-				"filename=\"mineways.zip\"\r\n" +
-				"Content-Type: application/octet-stream\r\n" +
-				"\r\n";
-			std::string tail = "\r\n--" + boundary + "--" +
-				"Content-Disposition: form-data; name=\"token\"\r\n\r\n" +
-				token +
-				"\r\n--" + boundary + "--" +
-				"Content-Disposition: form-data; name=\"source\"\r\n\r\n" +
-				"mineways" +
-				"\r\n--" + boundary + "--\r\n";
-
-			DWORD bytesWritten;
-			INTERNET_BUFFERS bufferIn;
-			memset(&bufferIn, 0, sizeof(INTERNET_BUFFERS));
-			bufferIn.dwStructSize = sizeof(INTERNET_BUFFERS);
-			bufferIn.dwBufferTotal = header.length() + body.length() + GetFileSize(wcZip, NULL) + tail.length();
-			
-			HttpSendRequestEx(hRequest, &bufferIn, NULL, HSR_INITIATE, 0);
-			InternetWriteFile(hRequest, (const void*)header.c_str(), header.length(), &bytesWritten);
-			InternetWriteFile(hRequest, (const void*)body.c_str(), body.length(), &bytesWritten);
-			FILE* file;
-			_wfopen_s(&file, wcZip, L"rb");
-			size_t sizeRead;
-			char buf[4096];
-			while ((sizeRead = fread(buf, sizeof(buf), 1, file)) > 0) {
-				InternetWriteFile(hRequest, (const void*)buf, sizeRead, &bytesWritten);
+			if (pClient->Request(_T("https://api.sketchfab.com/v2/models"), GenericHTTPClient::RequestPostMethodMultiPartsFormData, _T("CppUploader")))
+			{
+				MessageBox(0, pClient->QueryHTTPResponse(), L"http response", MB_OK);
+				MessageBox(0, pClient->QueryHTTPResponseHeader(), L"http response header", MB_OK);
+				std::cerr << pClient->QueryHTTPResponse() << std::endl; // server response as json read it for succesfull or not upload
+				std::cerr << "\n" << std::endl;
+				std::cerr << pClient->QueryHTTPResponseHeader() << std::endl;
 			}
-			fclose(file);
-			InternetWriteFile(hRequest, (const void*)tail.c_str(), tail.length(), &bytesWritten);
-			HttpEndRequest(hRequest, NULL, HSR_INITIATE, 0);
-
-			std::string response;
-			while (InternetReadFile(hRequest, buf, sizeof(buf) - 1, &bytesWritten)) {
-				if (bytesWritten == 0)
-					break;
-				buf[bytesWritten] = '\0';
-				response += buf;
-			}
-
-			DWORD headerBuffSize = sizeof(DWORD);
-			DWORD statusCode;
-			HttpQueryInfo(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &headerBuffSize, NULL);
-			if (statusCode == HTTP_STATUS_OK) {
-				MessageBox(hWnd, L"Upload completed", L"The model should be available on sketchfab", MB_OK | MB_ICONERROR);
-			} else {
-				std::wstring err = L"HTTP code : " + statusCode;
-				MessageBox(hWnd, L"Upload failed", err.c_str(), MB_OK | MB_ICONERROR);
-				std::wstring err2(response.begin(), response.end());
-				MessageBox(hWnd, L"Upload failed", err.c_str(), MB_OK | MB_ICONERROR);
-				response
+			else
+			{
+				std::cout << "connection fail\n" << std::endl;// something failed, network related you didn't reach sketchfab server
 			}
 
 
-
+			if (pClient)
+			{
+				delete pClient;
+			}
 		}
 
         if ( errCode != MW_NO_ERROR )
